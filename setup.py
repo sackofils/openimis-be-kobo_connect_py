@@ -24,7 +24,7 @@ setup(
         'django-db-signals',
         'djangorestframework',
         'openimis-be-core',
-        'openimis-be-grievance',
+        'openimis-be-grievance_social_protection',
         'pykobo',
     ],
     classifiers=[

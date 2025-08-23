@@ -9,6 +9,7 @@ kobo_connect/gql_types.py
 kobo_connect/models.py
 kobo_connect/schema.py
 kobo_connect/synchronizer.py
+kobo_connect/tasks.py
 kobo_connect/tests.py
 kobo_connect/urls.py
 kobo_connect/util.py
