@@ -29,9 +29,9 @@ class KoboSyncLogInline(admin.TabularInline):
 
 @admin.register(KoboForm)
 class KoboFormAdmin(admin.ModelAdmin):
-    list_display = ('name', 'kobo_uid', 'user', 'auto_sync', 'last_sync_date', 'last_sync_status')
+    list_display = ('name', 'kobo_uid', 'user', 'auto_sync', 'is_active', 'last_sync_date', 'last_sync_status')
     search_fields = ('name', 'kobo_uid')
-    inlines = [KoboFieldMappingInline,]
+    # inlines = [KoboFieldMappingInline,]
     actions = ['sync_selected_forms']
 
     @admin.action(description="Lancer la synchronisation des formulaires sélectionnés")

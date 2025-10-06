@@ -396,19 +396,24 @@ def _infer_priority(row: Dict[str, Any], category_value: Optional[str]) -> Optio
 
 
 def _infer_incident_date(row: Dict[str, Any], fallback_dt: Optional[timezone.datetime]) -> Optional[Any]:
-    """Tente d'inférer la date de l'incident. Préférence à un champ dédié si présent,
-    sinon retombe sur start/end/_submission_time. Retourne un date() ou None.
     """
-    keys = [
+    Déduit une date d'incident 'date' (pas datetime).
+    Ordre de préférence:
+      - champs dédiés (si présents un jour)
+      - 'end'
+      - '_submission_time'
+      - 'start'
+      - fallback (sub_ts)
+    """
+    candidate_keys = [
         # "groupe_detail_plainte/date_incident",
         # "groupe_detail_survivant/date_incident",
         # "date_incident",
-        # "current_datetime",
+        "end",
+        "_submission_time",
         "start",
-        # "end",
-        # "_submission_time",
     ]
-    for k in keys:
+    for k in candidate_keys:
         val = row.get(k)
         dt = _parse_ts(val) if val else None
         if dt:
@@ -418,6 +423,7 @@ def _infer_incident_date(row: Dict[str, Any], fallback_dt: Optional[timezone.dat
     return None
 
 
+
 def _maybe_set_resolved(ticket) -> bool:
     """Si une résolution est renseignée, bascule le statut en RESOLVED (sauf CLOSED)."""
     try:
@@ -425,8 +431,9 @@ def _maybe_set_resolved(ticket) -> bool:
         cur = getattr(ticket, "status", None)
         closed = getattr(getattr(Ticket, "TicketStatus", None), "CLOSED", "CLOSED")
         resolved = getattr(getattr(Ticket, "TicketStatus", None), "RESOLVED", "RESOLVED")
-        if has_resolution and cur != closed and cur != resolved:
-            return _assign_if_changed(ticket, "status", resolved)
+        # if has_resolution and cur != closed and cur != resolved:
+            # return _assign_if_changed(ticket, "status", resolved)
+        return _assign_if_changed(ticket, "status", "RECEIVED")
     except Exception:
         pass
     return False
@@ -625,7 +632,7 @@ def start_sync(kobo_form: KoboForm, user=None, since: Optional[timezone.datetime
                             try:
                                 # Fixer max_escalation_level selon la catégorie
                                 # sensible peut monter jusqu’au national
-                                ticket.max_escalation_level = 4 if ticket.priority == "Critical" else 3
+                                # ticket.max_escalation_level = 4 if ticket.priority == "Critical" else 3
                                 ticket.save(user=user)
                                 bootstrap_escalation_fields(ticket)
                             except TypeError:
@@ -765,8 +772,8 @@ def sync_one(kobo_form: KoboForm, submission_id: Any, user=None, dry_run: bool =
         is_create = ticket.pk is None
         if is_create or changed:
             try:
-                if not ticket.due_date:
-                    ticket.due_date = next_due_date(0)  # SLA du niveau local
+                # if not ticket.due_date:
+                #    ticket.due_date = next_due_date(0)  # SLA du niveau local
 
                 # Fixer max_escalation_level selon la catégorie
                 # sensible peut monter jusqu’au national

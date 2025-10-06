@@ -18,6 +18,9 @@ class KoboToken(HistoryBusinessModel):
 
 
 class KoboForm(HistoryBusinessModel):
+    MODULE_CHOICES = [
+        ("grievance_social_protection", "Grievance / Plaintes"),
+    ]
     kobo_id = models.CharField(max_length=255, null=True, blank=True)
     name = models.CharField(max_length=255, blank=False, null=False)
     description = models.TextField(blank=True, null=True)
@@ -25,8 +28,11 @@ class KoboForm(HistoryBusinessModel):
     api_key = models.ForeignKey(KoboToken, on_delete=models.CASCADE, related_name='forms')
     user = models.ForeignKey(User, on_delete=models.DO_NOTHING, blank=False, null=False)
     auto_sync = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
     sync_interval = models.IntegerField(null=True, blank=True)  # interval in minutes
     last_sync_date = models.DateTimeField(null=True, blank=True)
+    module = models.CharField(max_length=128, choices=MODULE_CHOICES, blank=True, null=True)
+    form_uid = models.CharField(max_length=255, unique=True, blank=True, null=True)
 
     def __str__(self):
         return f"Sync Settings for {self.name} by {self.user.username}"
