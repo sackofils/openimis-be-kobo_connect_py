@@ -32,7 +32,27 @@ class KoboFormAdmin(admin.ModelAdmin):
     list_display = ('name', 'kobo_uid', 'user', 'auto_sync', 'is_active', 'last_sync_date', 'last_sync_status')
     search_fields = ('name', 'kobo_uid')
     # inlines = [KoboFieldMappingInline,]
-    actions = ['sync_selected_forms']
+    actions = ['sync_selected_forms', "clone_for_update"]
+
+    save_as = True
+
+    @admin.action(description="Cloner pour mise à jour (nouvelle version)")
+    def clone_for_update(self, request, queryset):
+        if queryset.count() != 1:
+            self.message_user(request, "Sélectionnez un seul formulaire.", level=messages.WARNING)
+            return
+        old = queryset.first()
+        # Crée une nouvelle instance sans PK, en copiant les champs utiles
+        new_obj = KoboForm()
+        for f in old._meta.fields:
+            if f.primary_key:
+                continue
+
+            if f.name in ("validity_to",):
+                continue
+            setattr(new_obj, f.name, getattr(old, f.name))
+        new_obj.save()
+        self.message_user(request, f"Nouvelle version créée: {new_obj}", level=messages.SUCCESS)
 
     @admin.action(description="Lancer la synchronisation des formulaires sélectionnés")
     def sync_selected_forms(self, request, queryset):

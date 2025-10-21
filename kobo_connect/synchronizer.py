@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from .models import KoboToken, KoboForm, KoboFieldMapping, KoboSyncLog
-from grievance_social_protection.escalation_services import next_due_date, bootstrap_escalation_fields
+from grievance_social_protection.escalation_services import bootstrap_escalation_fields
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +390,8 @@ def _infer_priority(row: Dict[str, Any], category_value: Optional[str]) -> Optio
     v_norm = _strip_accents_lower(str(v))
     if any(k in v_norm for k in ["cas_non_sensible", "non sensible", "non sensibles"]):
         return "Normal"
+    if any(k in v_norm for k in ["cas_speciaux", "cas speciaux"]):
+        return "High"
     if any(k in v_norm for k in ["cas_sensible", "sensible", "sensibles"]):
         return "Critical"
     return None
@@ -493,6 +495,7 @@ def _apply_mapping(
         val = row[kobo_key]
         if resolve_label is not None:
             val = resolve_label(kobo_key, val)
+            print('*****val', val)
 
         # Parsing dates
         if model_field.endswith(("_at", "_date", "submitted_at")):
@@ -587,6 +590,8 @@ def start_sync(kobo_form: KoboForm, user=None, since: Optional[timezone.datetime
                 with transaction.atomic():
                     ticket = _find_existing_ticket(row, direct_map) or Ticket()
 
+                    if ticket.pk:
+                        continue
                     # (Optionnel) Liaison d'une Location si le modèle possède un champ 'location'
                     loc = _resolve_location_from_row(row)
                     if loc is not None and hasattr(ticket, "location"):
