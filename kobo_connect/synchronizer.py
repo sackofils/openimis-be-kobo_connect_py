@@ -13,6 +13,7 @@ from django.utils.dateparse import parse_datetime
 
 from .models import KoboToken, KoboForm, KoboFieldMapping, KoboSyncLog
 from grievance_social_protection.escalation_services import bootstrap_escalation_fields
+from monitoring_evaluation.models import MonitoringSubmission
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +351,30 @@ def _resolve_location_from_row(row: Dict[str, Any]) -> Optional[Any]:
                 obj = Location.objects.filter(name__iexact=str(v)).first()
                 if obj:
                     return obj
+        name_keys = [
+            "group_geo/group_district/district",
+            "group_geo/group_district/sous_prefecture",
+            "group_geo/group_district/prefecture",
+            "group_geo/group_district/region",
+        ]
+        for k in name_keys:
+            v = row.get(k)
+            if v:
+                obj = Location.objects.filter(name__iexact=str(v)).first()
+                if obj:
+                    return obj
+        name_keys = [
+            "group_geo/group_district/district",
+            "group_geo/group_district/sous_prefecture",
+            "group_geo/group_district/prefecture",
+            "group_geo/group_district/region",
+        ]
+        for k in name_keys:
+            v = row.get(k)
+            if v:
+                obj = Location.objects.filter(name__iexact=str(v)).first()
+                if obj:
+                    return obj
     except Exception:
         logger.debug("_resolve_location_from_row: pas de Location correspondante")
     return None
@@ -474,7 +499,6 @@ def _find_existing_ticket(row: Dict[str, Any], direct_map: Dict[str, str]) -> Op
             continue
     return None
 
-
 def _apply_mapping(
     row: Dict[str, Any],
     direct_map: Dict[str, str],
@@ -540,6 +564,70 @@ def _apply_mapping(
 
     return json_ext, changed
 
+def _apply_mapping_other(
+    row: Dict[str, Any],
+    direct_map: Dict[str, str],
+    extras_map: List[Tuple[str, str]],
+    submission: Any,
+    resolve_label=None,
+) -> Tuple[Dict[str, Any], bool]:
+    """Applique le mapping et retourne (json_ext, changed)."""
+    model_fields = {f.name for f in submission._meta.get_fields()}
+    original_json = deepcopy(getattr(submission, "json_ext", {}) or {})
+    json_ext: Dict[str, Any] = deepcopy(original_json)
+    changed = False
+
+    # Champs directs
+    for kobo_key, model_field in direct_map.items():
+        if kobo_key not in row or model_field not in model_fields:
+            continue
+        val = row[kobo_key]
+        if resolve_label is not None:
+            val = resolve_label(kobo_key, val)
+            print('*****val', val)
+
+        # Parsing dates
+        if model_field.endswith(("_at", "_date", "submitted_at")):
+            val = _parse_ts(val)
+
+        # Gestion du type du champ cible
+        try:
+            field_obj = submission._meta.get_field(model_field)
+        except Exception:
+            field_obj = None
+
+        # Si la valeur est une liste mais le champ est un CharField → join
+        if isinstance(val, list) and isinstance(field_obj, djm.CharField):
+            val = ", ".join(map(str, val))
+
+        # Éviter d'assigner des strings sur des FK
+        if getattr(getattr(field_obj, "remote_field", None), "model", None) is not None:
+            # Laisse une autre logique résoudre les FK si nécessaire
+            continue
+
+        if isinstance(val, str):
+            val = val.strip()
+
+        changed |= _assign_if_changed(submission, model_field, val)
+
+    # Extras -> json_ext (toujours stockés, liste conservée)
+    for kobo_key, dotted in extras_map:
+        if kobo_key not in row:
+            continue
+        val = row[kobo_key]
+        if resolve_label is not None:
+            val = resolve_label(kobo_key, val)
+        # Normalisations spécifiques
+        #if isinstance(val, str) and "," in val and dotted.endswith("responsable_plainte"):
+        #    val = [v.strip() for v in val.split(",") if v.strip()]
+        val = _coerce_bool_fr(val)
+        path = dotted[9:] if dotted.startswith("json_ext.") else dotted
+        _dot_set(json_ext, path, val)
+
+    if json_ext != original_json:
+        changed = True
+
+    return json_ext, changed
 
 # ---------------------------------------------------------------------------
 # API publique : synchronisations
@@ -576,92 +664,177 @@ def start_sync(kobo_form: KoboForm, user=None, since: Optional[timezone.datetime
     max_submission_ts: Optional[timezone.datetime] = getattr(kobo_form, "last_sync_date", None)
 
     try:
-        for row in client.iter_submissions(uid):
-            # Filtrage côté client
-            sub_ts = _parse_ts(row.get("_submission_time") or row.get("end") or row.get("start"))
-            if _since and sub_ts and sub_ts <= _since:
-                skipped += 1
-                continue
+        if kobo_form.module == 'grievance_social_protection':
+            for row in client.iter_submissions(uid):
+                # Filtrage côté client
+                sub_ts = _parse_ts(row.get("_submission_time") or row.get("end") or row.get("start"))
+                if _since and sub_ts and sub_ts <= _since:
+                    skipped += 1
+                    continue
 
-            if sub_ts and (max_submission_ts is None or sub_ts > max_submission_ts):
-                max_submission_ts = sub_ts
+                if sub_ts and (max_submission_ts is None or sub_ts > max_submission_ts):
+                    max_submission_ts = sub_ts
 
-            try:
-                with transaction.atomic():
-                    ticket = _find_existing_ticket(row, direct_map) or Ticket()
+                try:
+                    with transaction.atomic():
+                        ticket = _find_existing_ticket(row, direct_map) or Ticket()
 
-                    if ticket.pk:
-                        continue
-                    # (Optionnel) Liaison d'une Location si le modèle possède un champ 'location'
-                    loc = _resolve_location_from_row(row)
-                    if loc is not None and hasattr(ticket, "location"):
-                        _assign_if_changed(ticket, "location", loc)
+                        if ticket.pk:
+                            continue
+                        # (Optionnel) Liaison d'une Location si le modèle possède un champ 'location'
+                        loc = _resolve_location_from_row(row)
+                        if loc is not None and hasattr(ticket, "location"):
+                            _assign_if_changed(ticket, "location", loc)
 
-                    json_ext, changed = _apply_mapping(row, direct_map, extras_map, ticket, resolve_label=resolve_label)
+                        json_ext, changed = _apply_mapping(row, direct_map, extras_map, ticket, resolve_label=resolve_label)
 
-                    # Règles métier: priority / status / date_of_incident
-                    try:
-                        prio = _infer_priority(row, getattr(ticket, "category", None))
-                        if prio:
-                            changed |= _assign_if_changed(ticket, "priority", prio)
-                    except Exception:
-                        pass
+                        # Règles métier: priority / status / date_of_incident
+                        try:
+                            prio = _infer_priority(row, getattr(ticket, "category", None))
+                            if prio:
+                                changed |= _assign_if_changed(ticket, "priority", prio)
+                        except Exception:
+                            pass
 
-                    try:
-                        changed |= _maybe_set_resolved(ticket)
-                    except Exception:
-                        pass
+                        try:
+                            changed |= _maybe_set_resolved(ticket)
+                        except Exception:
+                            pass
 
-                    try:
-                        incident_date = _infer_incident_date(row, sub_ts)
-                        if incident_date is not None:
-                            changed |= _assign_if_changed(ticket, "date_of_incident", incident_date)
-                    except Exception:
-                        pass
+                        try:
+                            incident_date = _infer_incident_date(row, sub_ts)
+                            if incident_date is not None:
+                                changed |= _assign_if_changed(ticket, "date_of_incident", incident_date)
+                        except Exception:
+                            pass
 
-                    # Champs génériques facultatifs
-                    if hasattr(ticket, "json_ext"):
-                        if (getattr(ticket, "json_ext", {}) or {}) != json_ext:
-                            ticket.json_ext = json_ext
-                            changed = True
-                    if hasattr(ticket, "submitted_at") and sub_ts:
-                        changed |= _assign_if_changed(ticket, "submitted_at", sub_ts)
-                    if hasattr(ticket, "source") and not getattr(ticket, "source", None):
-                        changed |= _assign_if_changed(ticket, "source", "KOBO")
+                        # Champs génériques facultatifs
+                        if hasattr(ticket, "json_ext"):
+                            if (getattr(ticket, "json_ext", {}) or {}) != json_ext:
+                                ticket.json_ext = json_ext
+                                changed = True
+                        if hasattr(ticket, "submitted_at") and sub_ts:
+                            changed |= _assign_if_changed(ticket, "submitted_at", sub_ts)
+                        if hasattr(ticket, "source") and not getattr(ticket, "source", None):
+                            changed |= _assign_if_changed(ticket, "source", "KOBO")
 
-                    if dry_run:
-                        logger.info("[Dry-Run] Ticket simulé (create/update): %s", getattr(ticket, "code", None))
+                        if dry_run:
+                            logger.info("[Dry-Run] Ticket simulé (create/update): %s", getattr(ticket, "code", None))
+                        else:
+                            is_create = ticket.pk is None
+                            if is_create or changed:
+                                try:
+                                    # Fixer max_escalation_level selon la catégorie
+                                    # sensible peut monter jusqu’au national
+                                    # ticket.max_escalation_level = 4 if ticket.priority == "Critical" else 3
+                                    ticket.save(user=user)
+                                    bootstrap_escalation_fields(ticket)
+                                except TypeError:
+                                    ticket.save()
+                                if is_create:
+                                    created += 1
+                                else:
+                                    updated += 1
+                            else:
+                                skipped += 1  # aucun changement → ne pas sauver pour éviter ValidationError
+
+                except ValidationError as ve:
+                    # HistoryBusinessModel peut lever si aucun changement; on le compte en 'skipped'
+                    msg = " ".join(map(str, ve.messages))
+                    if "no changes" in msg.lower():
+                        skipped += 1
                     else:
-                        is_create = ticket.pk is None
-                        if is_create or changed:
-                            try:
-                                # Fixer max_escalation_level selon la catégorie
-                                # sensible peut monter jusqu’au national
-                                # ticket.max_escalation_level = 4 if ticket.priority == "Critical" else 3
-                                ticket.save(user=user)
-                                bootstrap_escalation_fields(ticket)
-                            except TypeError:
-                                ticket.save()
+                        failed += 1
+                        logger.exception("[Kobo Sync] Validation error")
+                        _save_log(kobo_form, user, status="failed", action="row_error", message=str(ve), details=row)
+                except Exception as inner:
+                    failed += 1
+                    logger.exception("[Kobo Sync] Erreur upsert pour une soumission")
+                    _save_log(kobo_form, user, status="failed", action="row_error", message=str(inner), details=row)
+
+        elif kobo_form.module == 'monitoring_evaluation':
+            from datetime import timezone
+
+            def to_utc(dt):
+                """Force un datetime à être aware UTC."""
+                if dt is None:
+                    return None
+                if dt.tzinfo is None:
+                    return dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+
+            # Normaliser _since juste une fois
+            _since = to_utc(_since)
+
+            for row in client.iter_submissions(uid):
+
+                # -- Récupération du timestamp brut --
+                sub_ts = _parse_ts(
+                    row.get("_submission_time")
+                    or row.get("end")
+                    or row.get("start")
+                )
+
+                # -- Normalisation UTC --
+                sub_ts = to_utc(sub_ts)
+
+                # -- Filtrage : éviter les doublons déjà synchronisés --
+                if _since and sub_ts and sub_ts <= _since:
+                    skipped += 1
+                    continue
+
+                # -- Mise à jour du max_submission_ts --
+                max_submission_ts = to_utc(max_submission_ts)
+                if sub_ts and (max_submission_ts is None or sub_ts > max_submission_ts):
+                    max_submission_ts = sub_ts
+
+                sub_uuid = row.get("_uuid") or row.get("meta/instanceID")
+
+                try:
+                    with transaction.atomic():
+
+                        # Récupération ou création
+                        sub = MonitoringSubmission.objects.filter(submission_uuid=sub_uuid).first()
+                        is_create = sub is None
+                        if is_create:
+                            sub = MonitoringSubmission()
+
+                        # Champs de base
+                        sub.submission_uuid = sub_uuid
+                        sub.submitted_at = sub_ts
+                        sub.form_type = getattr(kobo_form, "code", "UNKNOWN")
+
+                        # Résolution localisation
+                        sub.location = _resolve_location_from_row(row)
+
+                        # Application du mapping JSON
+                        json_ext, changed = _apply_mapping(
+                            row,
+                            direct_map,
+                            extras_map,
+                            sub,
+                            resolve_label=resolve_label
+                        )
+                        sub.json_ext = json_ext
+
+                        # Déduction automatique de la période (ex : 2025-T3)
+                        sub.period = f"{sub_ts.year}-T{((sub_ts.month - 1) // 3) + 1}"
+
+                        # Sauvegarde
+                        if dry_run:
+                            logger.info("[Dry-Run] Soumission simulée (create/update): %s", sub.submission_uuid)
+                        else:
+                            sub.save(user=user)
                             if is_create:
                                 created += 1
                             else:
                                 updated += 1
-                        else:
-                            skipped += 1  # aucun changement → ne pas sauver pour éviter ValidationError
 
-            except ValidationError as ve:
-                # HistoryBusinessModel peut lever si aucun changement; on le compte en 'skipped'
-                msg = " ".join(map(str, ve.messages))
-                if "no changes" in msg.lower():
-                    skipped += 1
-                else:
+                except Exception as inner:
                     failed += 1
-                    logger.exception("[Kobo Sync] Validation error")
-                    _save_log(kobo_form, user, status="failed", action="row_error", message=str(ve), details=row)
-            except Exception as inner:
-                failed += 1
-                logger.exception("[Kobo Sync] Erreur upsert pour une soumission")
-                _save_log(kobo_form, user, status="failed", action="row_error", message=str(inner), details=row)
+                    logger.exception("[ME Sync] Erreur sur une soumission: %s", inner)
+                    _save_log(kobo_form, user, "failed", "row_error", str(inner), row)
+
 
     except Exception as e:
         _save_log(kobo_form, user, status="failed", action="error", message=str(e))
@@ -698,104 +871,3 @@ def sync_all_kobo_forms() -> None:
             start_sync(form, user=user)
         except Exception as e:
             logger.error(f"[Scheduler] Erreur de sync pour {form}: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Fonctions utilitaires supplémentaires
-# ---------------------------------------------------------------------------
-
-def sync_since(kobo_form: KoboForm, minutes: int, user=None) -> None:
-    """Synchronise uniquement les soumissions des X dernières minutes."""
-    since = timezone.now() - timedelta(minutes=minutes)
-    start_sync(kobo_form, user=user, since=since)
-
-
-def sync_one(kobo_form: KoboForm, submission_id: Any, user=None, dry_run: bool = False) -> Optional[Any]:
-    """Synchronise UNE soumission par identifiant externe (si l'endpoint unitaire est dispo)."""
-    token = _get_token(kobo_form)
-    base_url = (token.url_kobo or "").strip().rstrip("/")
-    uid = _get_uid(kobo_form)
-    client = KoboClient(base_url=base_url, token=token.api_key)
-
-    # Résolution des labels (select_one / select_multiple)
-    LABEL_LANG = "fr"
-    try:
-        resolve_label = _build_choice_resolver(client, uid, lang=LABEL_LANG)
-    except Exception as e:
-        logger.warning("[Kobo Label] Désactivé: %s", e)
-        resolve_label = None
-
-    row = client.get_submission(uid, submission_id)
-    if not row:
-        logger.warning("[sync_one] Soumission introuvable: %s", submission_id)
-        return None
-
-    direct_map, extras_map = _build_mapping(kobo_form)
-    sub_ts = _parse_ts(row.get("_submission_time") or row.get("end") or row.get("start"))
-
-    with transaction.atomic():
-        ticket = _find_existing_ticket(row, direct_map) or Ticket()
-        loc = _resolve_location_from_row(row)
-        if loc is not None and hasattr(ticket, "location"):
-            _assign_if_changed(ticket, "location", loc)
-
-        json_ext, changed = _apply_mapping(row, direct_map, extras_map, ticket, resolve_label=resolve_label)
-
-        # Règles métier: priority / status / date_of_incident
-        try:
-            prio = _infer_priority(row, getattr(ticket, "category", None))
-            if prio:
-                changed |= _assign_if_changed(ticket, "priority", prio)
-        except Exception:
-            pass
-
-        try:
-            changed |= _maybe_set_resolved(ticket)
-        except Exception:
-            pass
-
-        try:
-            incident_date = _infer_incident_date(row, sub_ts)
-            if incident_date is not None:
-                changed |= _assign_if_changed(ticket, "date_of_incident", incident_date)
-        except Exception:
-            pass
-
-        if hasattr(ticket, "json_ext"):
-            if (getattr(ticket, "json_ext", {}) or {}) != json_ext:
-                ticket.json_ext = json_ext
-                changed = True
-        if hasattr(ticket, "submitted_at") and sub_ts:
-            changed |= _assign_if_changed(ticket, "submitted_at", sub_ts)
-        if hasattr(ticket, "source") and not getattr(ticket, "source", None):
-            changed |= _assign_if_changed(ticket, "source", "KOBO")
-
-        if dry_run:
-            logger.info("[Dry-Run] sync_one simulé pour submission_id=%s", submission_id)
-            return ticket
-
-        is_create = ticket.pk is None
-        if is_create or changed:
-            try:
-                # if not ticket.due_date:
-                #    ticket.due_date = next_due_date(0)  # SLA du niveau local
-
-                # Fixer max_escalation_level selon la catégorie
-                # sensible peut monter jusqu’au national
-                # ticket.max_escalation_level = 4 if ticket.priority == "Critical" else 3
-                ticket.save(user=user)
-                bootstrap_escalation_fields(ticket)
-            except TypeError:
-                ticket.save()
-            # Journaliser la sync unitaire
-            _save_log(
-                kobo_form,
-                user,
-                status="success",
-                action="single",
-                message=f"sync_one: submission={submission_id}, created={is_create}",
-                details=row,
-            )
-        else:
-            logger.info("[sync_one] Aucun changement pour submission_id=%s", submission_id)
-        return ticket

@@ -20,7 +20,9 @@ class KoboToken(HistoryBusinessModel):
 class KoboForm(HistoryBusinessModel):
     MODULE_CHOICES = [
         ("grievance_social_protection", "Grievance / Plaintes"),
+        ("monitoring_evaluation", "Monitoring Evaluation"),
     ]
+    code = models.CharField(max_length=128, unique=True, blank=True, null=True)
     kobo_id = models.CharField(max_length=255, null=True, blank=True)
     name = models.CharField(max_length=255, blank=False, null=False)
     description = models.TextField(blank=True, null=True)
