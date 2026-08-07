@@ -1,9 +1,7 @@
 import logging
-import re
 from copy import deepcopy
-from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from django.apps import apps
 from django.core.exceptions import ValidationError
@@ -11,6 +9,11 @@ from django.db import transaction, models as djm
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from .client import (
+    KoboClient,
+    build_choice_resolver as _build_choice_resolver,
+    coerce_boolean as _coerce_bool_fr,
+)
 from .models import KoboToken, KoboForm, KoboFieldMapping, KoboSyncLog
 from grievance_social_protection.escalation_services import bootstrap_escalation_fields
 from monitoring_evaluation.models import MonitoringSubmission
@@ -19,128 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Helpers: Label resolver for select_one / select_multiple
-# ---------------------------------------------------------------------------
-
-def _norm_lang_key(s: str) -> str:
-    import unicodedata
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    return re.sub(r"[\s()]+", "", s).lower()
-
-
-def _pick_lang(label_obj, pref_lang: Optional[str]):
-    """Return best text from a possibly multilingual label object."""
-    if isinstance(label_obj, str):
-        return label_obj
-    if isinstance(label_obj, dict) and label_obj:
-        if pref_lang:
-            want = _norm_lang_key(pref_lang)
-            for k, v in label_obj.items():
-                if _norm_lang_key(k) == want:
-                    return v
-        return next(iter(label_obj.values()))
-    if isinstance(label_obj, list) and label_obj:
-        first = label_obj[0]
-        if isinstance(first, dict):
-            if pref_lang:
-                want = _norm_lang_key(pref_lang)
-                for it in label_obj:
-                    if _norm_lang_key(str(it.get("lang", ""))) == want:
-                        return it.get("text") or it
-            return first.get("text") or first
-        # e.g. ["Oui"] → "Oui"
-        return first
-    return None
-
-
-def _build_choice_resolver(client, asset_uid: str, lang: Optional[str] = None):
-    """
-    Construit un résolveur (kobo_key, raw_val) -> label(s) en s'appuyant sur
-    content.survey / content.choices de l'asset KPI v2.
-    Gère: choices en dict OU liste, select_from_list_name, multi-select (espaces/virgules/listes).
-    """
-    asset = client.get_json(f"assets/{asset_uid}/")  # format=json est forcé par get_json
-    content = asset.get("content") or {}
-    survey = content.get("survey") or []
-    choices_raw = content.get("choices") or []
-
-    # Normaliser choices en dict(list_name -> list[choice])
-    if isinstance(choices_raw, dict):
-        choices_by_list = choices_raw
-    else:
-        choices_by_list: Dict[str, List[Dict[str, Any]]] = {}
-        for ch in choices_raw:
-            ln = ch.get("list_name")
-            if ln:
-                choices_by_list.setdefault(ln, []).append(ch)
-
-    # list_name -> { code: label }
-    list_to_labels: Dict[str, Dict[str, str]] = {}
-    for ln, items in (choices_by_list or {}).items():
-        lut: Dict[str, str] = {}
-        for ch in items or []:
-            code = ch.get("name")
-            label = _pick_lang(ch.get("label"), lang)
-            if code is not None and label is not None:
-                lut[str(code)] = str(label)
-        list_to_labels[ln] = lut
-
-    # question_name -> list_name
-    field_to_list: Dict[str, str] = {}
-    for q in survey:
-        qname = q.get("name")
-        qtype = (q.get("type") or "").strip()
-        ln = None
-        if q.get("select_from_list_name"):
-            ln = q["select_from_list_name"]
-        elif qtype.startswith("select_one") or qtype.startswith("select_multiple"):
-            parts = qtype.split()
-            ln = parts[1] if len(parts) > 1 else None
-        if qname and ln:
-            field_to_list[qname] = ln
-
-    logger.debug("[Kobo Label] field_to_list: %s", field_to_list)
-    logger.debug("[Kobo Label] lists: %s", {k: len(v) for k, v in list_to_labels.items()})
-
-    def resolve(kobo_key: str, raw_val):
-        leaf = kobo_key.split("/")[-1]
-        ln = field_to_list.get(leaf)
-        if not ln:
-            return raw_val  # pas une question select_*
-        lut = list_to_labels.get(ln, {})
-        # multi-select
-        if isinstance(raw_val, list):
-            codes = raw_val
-        elif isinstance(raw_val, str):
-            codes = re.split(r"[,\s]+", raw_val.strip())
-            codes = [c for c in codes if c]
-        else:
-            codes = None
-        if codes is not None:
-            return [lut.get(str(c), c) for c in codes]
-        # select_one
-        return lut.get(str(raw_val), raw_val)
-
-    return resolve
-
-
-def _coerce_bool_fr(value: Any) -> Any:
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v in ("oui", "yes", "true", "1"):
-            return True
-        if v in ("non", "no", "false", "0"):
-            return False
-    return value
-
-
-# ---------------------------------------------------------------------------
 # Réglages
 # ---------------------------------------------------------------------------
-API_PREFIX = "/api/v2"
-REQUEST_TIMEOUT = 60          # secondes
-PAGE_SIZE = 1000              # éléments par page KPI
 BACKOFF_MINUTES = 1           # marge pour éviter les “bords” temporels
 
 # Ticket (module plainte/grievance)
@@ -157,62 +40,6 @@ except Exception:  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
-# Client Kobo KPI v2
-# ---------------------------------------------------------------------------
-@dataclass
-class KoboClient:
-    base_url: str
-    token: str
-
-    def _headers(self) -> Dict[str, str]:
-        return {"Authorization": f"Token {self.token}", "Accept": "application/json"}
-
-    def _abs(self, path: str) -> str:
-        return f"{self.base_url.rstrip('/')}{API_PREFIX}/{path.lstrip('/')}"
-
-    def get_json(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        import requests, json as _json
-        url = self._abs(path)
-        params = dict(params or {})
-        params.setdefault("format", "json")
-        r = requests.get(url, headers=self._headers(), params=params, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        try:
-            return r.json()
-        except ValueError:
-            text = r.text.lstrip("\ufeff").strip()
-            return _json.loads(text)
-
-    def iter_submissions(self, asset_uid: str, page_size: int = PAGE_SIZE) -> Iterable[Dict[str, Any]]:
-        """Itère toutes les soumissions pour un asset (UID) avec pagination."""
-        import requests
-        url = self._abs(f"assets/{asset_uid}/data/")
-        params: Optional[Dict[str, Any]] = {"format": "json", "limit": page_size}
-        while url:
-            r = requests.get(url, headers=self._headers(), params=params, timeout=REQUEST_TIMEOUT)
-            r.raise_for_status()
-            payload = r.json()
-            for row in payload.get("results", []):
-                yield row
-            url = payload.get("next")
-            params = None  # les URLs "next" sont absolues
-
-    def get_submission(self, asset_uid: str, submission_id: Any) -> Optional[Dict[str, Any]]:
-        """Récupère UNE soumission. Selon l'instance, l'endpoint /data/{id}/ peut être disponible."""
-        import requests
-        url = self._abs(f"assets/{asset_uid}/data/{submission_id}/")
-        try:
-            r = requests.get(url, headers=self._headers(), params={"format": "json"}, timeout=REQUEST_TIMEOUT)
-            if r.status_code == 404:
-                return None
-            r.raise_for_status()
-            return r.json()
-        except Exception:
-            logger.warning("[KPI] get_submission: endpoint unitaire non disponible")
-            return None
-
-
-# ---------------------------------------------------------------------------
 # Utilitaires de dates / booléens / logs / mapping
 # ---------------------------------------------------------------------------
 
@@ -225,16 +52,6 @@ def _parse_ts(value: Any) -> Optional[timezone.datetime]:
     if dt is None:
         return None
     return dt if timezone.is_aware(dt) else timezone.make_aware(dt)
-
-
-def _bool_fr(value: Any) -> Any:
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v in ("oui", "yes", "true", "1"):
-            return True
-        if v in ("non", "no", "false", "0"):
-            return False
-    return value
 
 
 def should_sync(form: KoboForm) -> bool:
@@ -454,15 +271,9 @@ def _infer_incident_date(row: Dict[str, Any], fallback_dt: Optional[timezone.dat
 def _maybe_set_resolved(ticket) -> bool:
     """Si une résolution est renseignée, bascule le statut en RESOLVED (sauf CLOSED)."""
     try:
-        has_resolution = bool(getattr(ticket, "resolution", None))
-        cur = getattr(ticket, "status", None)
-        closed = getattr(getattr(Ticket, "TicketStatus", None), "CLOSED", "CLOSED")
-        resolved = getattr(getattr(Ticket, "TicketStatus", None), "RESOLVED", "RESOLVED")
-        # if has_resolution and cur != closed and cur != resolved:
-            # return _assign_if_changed(ticket, "status", resolved)
         return _assign_if_changed(ticket, "status", "RECEIVED")
     except Exception:
-        pass
+        logger.exception("Unable to initialize the synchronized ticket status")
     return False
 
 # ---------------------------------------------------------------------------
@@ -646,7 +457,7 @@ def start_sync(kobo_form: KoboForm, user=None, since: Optional[timezone.datetime
     # Résolution des labels (select_one / select_multiple)
     LABEL_LANG = "fr"  # ou "French" selon tes assets
     try:
-        resolve_label = _build_choice_resolver(client, uid, lang=LABEL_LANG)
+        resolve_label = _build_choice_resolver(client, uid, language=LABEL_LANG)
     except Exception as e:
         logger.warning("[Kobo Label] Désactivé: %s", e)
         resolve_label = None
@@ -678,9 +489,6 @@ def start_sync(kobo_form: KoboForm, user=None, since: Optional[timezone.datetime
                 try:
                     with transaction.atomic():
                         ticket = _find_existing_ticket(row, direct_map) or Ticket()
-
-                        if ticket.pk:
-                            continue
                         # (Optionnel) Liaison d'une Location si le modèle possède un champ 'location'
                         loc = _resolve_location_from_row(row)
                         if loc is not None and hasattr(ticket, "location"):
@@ -789,6 +597,13 @@ def start_sync(kobo_form: KoboForm, user=None, since: Optional[timezone.datetime
                     max_submission_ts = sub_ts
 
                 sub_uuid = row.get("_uuid") or row.get("meta/instanceID")
+                if not sub_uuid or sub_ts is None:
+                    failed += 1
+                    _save_log(
+                        kobo_form, user, 'failed', 'row_error',
+                        'Soumission sans UUID ou date', row,
+                    )
+                    continue
 
                 try:
                     with transaction.atomic():
@@ -824,11 +639,14 @@ def start_sync(kobo_form: KoboForm, user=None, since: Optional[timezone.datetime
                         if dry_run:
                             logger.info("[Dry-Run] Soumission simulée (create/update): %s", sub.submission_uuid)
                         else:
-                            sub.save(user=user)
-                            if is_create:
-                                created += 1
+                            if is_create or sub.is_dirty(check_relationship=True):
+                                sub.save(user=user)
+                                if is_create:
+                                    created += 1
+                                else:
+                                    updated += 1
                             else:
-                                updated += 1
+                                skipped += 1
 
                 except Exception as inner:
                     failed += 1

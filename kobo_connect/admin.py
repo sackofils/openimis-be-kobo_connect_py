@@ -1,3 +1,4 @@
+from django import forms
 from django.contrib import admin, messages
 from django.utils.translation import gettext_lazy as _
 from .models import KoboFieldMapping, KoboForm, KoboSyncLog, KoboToken
@@ -82,10 +83,30 @@ class KoboFormAdmin(admin.ModelAdmin):
         obj.save(user=request.user)
 
 
+class KoboTokenAdminForm(forms.ModelForm):
+    api_key = forms.CharField(
+        label=_("Cle API"),
+        required=False,
+        widget=forms.PasswordInput(render_value=False),
+    )
+
+    class Meta:
+        model = KoboToken
+        fields = "__all__"
+
+    def clean_api_key(self):
+        api_key = self.cleaned_data.get("api_key")
+        if api_key:
+            return api_key
+        if self.instance.pk:
+            return self.instance.api_key
+        raise forms.ValidationError(_("La cle API est obligatoire."))
+
 @admin.register(KoboToken)
 class KoboTokenAdmin(admin.ModelAdmin):
-    list_display = ('user', 'url_kobo', 'api_version', 'api_key')
-    search_fields = ('user__username', 'url_kobo', 'api_key')
+    form = KoboTokenAdminForm
+    list_display = ('user', 'url_kobo', 'api_version', 'has_api_key')
+    search_fields = ('user__username', 'url_kobo')
     list_filter = ('api_version',)
     # readonly_fields = ('created_at', 'updated_at')
 
@@ -97,3 +118,7 @@ class KoboTokenAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         obj.save(user=request.user)
+
+    @admin.display(boolean=True, description=_("Cle API configuree"))
+    def has_api_key(self, obj):
+        return bool(obj.api_key)

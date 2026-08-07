@@ -1,9 +1,7 @@
 import graphene
 from graphene_django import DjangoObjectType
-from django.core.exceptions import PermissionDenied
-from django.utils.translation import gettext as _
+from .apps import KoboConnectConfig
 from .models import KoboForm, KoboToken, KoboSyncLog, KoboFieldMapping
-from django.contrib.auth.models import User
 
 
 class KoboFormGQLType(DjangoObjectType):
@@ -28,7 +26,7 @@ class KoboFormGQLType(DjangoObjectType):
         except cls._meta.model.DoesNotExist:
             return None
 
-        if info.context.user.has_perm("kobo_connect.view_koboform"):
+        if info.context.user.has_perms(KoboConnectConfig.gql_query_forms_perms):
             return kobo_form
         return None
 
@@ -37,11 +35,11 @@ class KoboTokenGQLType(DjangoObjectType):
     class Meta:
         model = KoboToken
         interfaces = (graphene.relay.Node,)
+        exclude_fields = ("api_key",)
         filter_fields = {
             "id": ["exact"],
             "url_kobo": ["exact"],
             "api_version": ["exact", "icontains"],
-            "api_key": ["exact", "icontains"],
             "user": ["exact", "isnull"],
         }
         description = "Type for Kobo tokens"

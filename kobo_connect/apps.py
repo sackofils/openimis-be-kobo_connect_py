@@ -12,7 +12,7 @@ DEFAULT_CFG = {
     "gql_mutation_forms_update_perms": ["121808"],
     "gql_mutation_forms_delete_perms": ["121809"],
 
-    "gql_mutation_tokens_add_perms": ["121809"],
+    "gql_mutation_tokens_add_perms": ["121812"],
     "gql_mutation_tokens_update_perms": ["121810"],
     "gql_mutation_tokens_delete_perms": ["121811"],
 }

@@ -1,143 +1,258 @@
 import graphene
-from core.gql.gql_mutations.base_mutation import BaseHistoryModelCreateMutationMixin, BaseMutation, \
-    BaseHistoryModelUpdateMutationMixin, BaseHistoryModelDeleteMutationMixin
-from core.schema import OpenIMISMutation
-from .models import KoboToken, KoboForm, KoboFormMutation, KoboSyncLog, KoboFieldMapping
 from django.core.exceptions import PermissionDenied
 from django.utils.translation import gettext_lazy as _
-from django.contrib.auth.models import User
-from .gql_types import KoboFormGQLType, KoboTokenGQLType, KoboSyncLogGQLType, KoboFieldMappingGQLType
+
+from core.gql.gql_mutations.base_mutation import (
+    BaseHistoryModelCreateMutationMixin,
+    BaseHistoryModelDeleteMutationMixin,
+    BaseHistoryModelUpdateMutationMixin,
+    BaseMutation,
+)
+from core.schema import OpenIMISMutation
+
+from .apps import KoboConnectConfig
+from .models import KoboFieldMapping, KoboForm, KoboToken
+from .services import (
+    KoboFieldMappingService,
+    KoboFormService,
+    KoboTokenService,
+)
 
 
-class CreateKoboTokenMutation(OpenIMISMutation):
+def _require_permissions(user, permissions):
+    if not user.has_perms(permissions):
+        raise PermissionDenied(_("Unauthorized"))
+
+
+def _clean_mutation_metadata(data):
+    cleaned = dict(data)
+    cleaned.pop("client_mutation_id", None)
+    cleaned.pop("client_mutation_label", None)
+    return cleaned
+
+
+def _delete_with_service(service_class, user, data):
+    cleaned = _clean_mutation_metadata(data)
+    ids = cleaned.get("ids") or [cleaned.get("id")]
+    for object_id in filter(None, ids):
+        response = service_class(user).delete({"id": object_id, "user": user})
+        if not response.get("success"):
+            return response
+    return None
+
+
+class KoboTokenInput(OpenIMISMutation.Input):
+    url_kobo = graphene.String(required=True)
+    api_version = graphene.String()
+    api_key = graphene.String(required=True)
+
+
+class UpdateKoboTokenInput(OpenIMISMutation.Input):
+    id = graphene.UUID(required=True)
+    url_kobo = graphene.String()
+    api_version = graphene.String()
+    api_key = graphene.String()
+
+
+class DeleteInput(OpenIMISMutation.Input):
+    ids = graphene.List(graphene.UUID, required=True)
+
+
+class CreateKoboTokenMutation(BaseHistoryModelCreateMutationMixin, BaseMutation):
+    _mutation_class = "CreateKoboTokenMutation"
+    _mutation_module = "kobo_connect"
+    _model = KoboToken
+
+    class Input(KoboTokenInput):
+        pass
+
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.add_kobotoken'):
-            raise PermissionDenied(_("Unauthorized"))
-        kobo_token = KoboToken(**data)
-        kobo_token.save(user=info.context.user)
-        return None
+    def _validate_mutation(cls, user, **data):
+        super()._validate_mutation(user, **data)
+        _require_permissions(user, KoboConnectConfig.gql_mutation_tokens_add_perms)
 
-
-class UpdateKoboTokenMutation(OpenIMISMutation):
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.change_kobotoken'):
-            raise PermissionDenied(_("Unauthorized"))
-        kobo_token = KoboToken.objects.get(id=data['id'])
-        for key, value in data.items():
-            setattr(kobo_token, key, value)
-        kobo_token.save(user=info.context.user)
-        return None
+    def _mutate(cls, user, **data):
+        response = KoboTokenService(user).create(_clean_mutation_metadata(data))
+        return None if response.get("success") else response
 
 
+class UpdateKoboTokenMutation(BaseHistoryModelUpdateMutationMixin, BaseMutation):
+    _mutation_class = "UpdateKoboTokenMutation"
+    _mutation_module = "kobo_connect"
+    _model = KoboToken
 
-class DeleteKoboTokenMutation(OpenIMISMutation):
+    class Input(UpdateKoboTokenInput):
+        pass
+
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.delete_kobotoken'):
-            raise PermissionDenied(_("Unauthorized"))
-        KoboToken.objects.filter(id__in=data['ids']).delete()
-        return None
+    def _validate_mutation(cls, user, **data):
+        super()._validate_mutation(user, **data)
+        _require_permissions(user, KoboConnectConfig.gql_mutation_tokens_update_perms)
 
-
-
-class CreateKoboFormMutation(OpenIMISMutation):
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.add_koboform'):
-            raise PermissionDenied(_("Unauthorized"))
-        kobo_form = KoboForm(**data)
-        kobo_form.save(user=info.context.user)
-        return None
+    def _mutate(cls, user, **data):
+        response = KoboTokenService(user).update(_clean_mutation_metadata(data))
+        return None if response.get("success") else response
 
 
+class DeleteKoboTokenMutation(BaseHistoryModelDeleteMutationMixin, BaseMutation):
+    _mutation_class = "DeleteKoboTokenMutation"
+    _mutation_module = "kobo_connect"
+    _model = KoboToken
 
-class UpdateKoboFormMutation(OpenIMISMutation):
+    class Input(DeleteInput):
+        pass
+
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.change_koboform'):
-            raise PermissionDenied(_("Unauthorized"))
-        kobo_form = KoboForm.objects.get(id=data['id'])
-        for key, value in data.items():
-            setattr(kobo_form, key, value)
-        kobo_form.save(user=info.context.user)
-        return None
+    def _validate_mutation(cls, user, **data):
+        super()._validate_mutation(user, **data)
+        _require_permissions(user, KoboConnectConfig.gql_mutation_tokens_delete_perms)
 
-
-
-class DeleteKoboFormMutation(OpenIMISMutation):
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.delete_koboform'):
-            raise PermissionDenied(_("Unauthorized"))
-        KoboForm.objects.filter(id__in=data['ids']).delete()
-        return None
+    def _mutate(cls, user, **data):
+        return _delete_with_service(KoboTokenService, user, data)
 
 
+class KoboFormInput(OpenIMISMutation.Input):
+    code = graphene.String()
+    kobo_id = graphene.String()
+    name = graphene.String(required=True)
+    description = graphene.String()
+    kobo_uid = graphene.String(required=True)
+    api_key_id = graphene.UUID(required=True)
+    auto_sync = graphene.Boolean()
+    is_active = graphene.Boolean()
+    sync_interval = graphene.Int()
+    module = graphene.String()
+    form_uid = graphene.String()
 
-class CreateKoboSyncLogMutation(OpenIMISMutation):
+
+class UpdateKoboFormInput(KoboFormInput):
+    id = graphene.UUID(required=True)
+    name = graphene.String()
+    kobo_uid = graphene.String()
+    api_key_id = graphene.UUID()
+
+
+class CreateKoboFormMutation(BaseHistoryModelCreateMutationMixin, BaseMutation):
+    _mutation_class = "CreateKoboFormMutation"
+    _mutation_module = "kobo_connect"
+    _model = KoboForm
+
+    class Input(KoboFormInput):
+        pass
+
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.add_kobosynclog'):
-            raise PermissionDenied(_("Unauthorized"))
-        kobo_sync_log = KoboSyncLog(**data)
-        kobo_sync_log.save(user=info.context.user)
-        return None
+    def _validate_mutation(cls, user, **data):
+        super()._validate_mutation(user, **data)
+        _require_permissions(user, KoboConnectConfig.gql_mutation_forms_add_perms)
 
-
-
-class UpdateKoboSyncLogMutation(OpenIMISMutation):
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.change_kobosynclog'):
-            raise PermissionDenied(_("Unauthorized"))
-        kobo_sync_log = KoboSyncLog.objects.get(id=data['id'])
-        for key, value in data.items():
-            setattr(kobo_sync_log, key, value)
-        kobo_sync_log.save(user=info.context.user)
-        return None
+    def _mutate(cls, user, **data):
+        response = KoboFormService(user).create(_clean_mutation_metadata(data))
+        return None if response.get("success") else response
 
 
+class UpdateKoboFormMutation(BaseHistoryModelUpdateMutationMixin, BaseMutation):
+    _mutation_class = "UpdateKoboFormMutation"
+    _mutation_module = "kobo_connect"
+    _model = KoboForm
 
-class DeleteKoboSyncLogMutation(OpenIMISMutation):
+    class Input(UpdateKoboFormInput):
+        pass
+
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.delete_kobosynclog'):
-            raise PermissionDenied(_("Unauthorized"))
-        KoboSyncLog.objects.filter(id__in=data['ids']).delete()
-        return None
+    def _validate_mutation(cls, user, **data):
+        super()._validate_mutation(user, **data)
+        _require_permissions(user, KoboConnectConfig.gql_mutation_forms_update_perms)
 
-
-
-class CreateKoboFieldMappingMutation(OpenIMISMutation):
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.add_kobofieldmapping'):
-            raise PermissionDenied(_("Unauthorized"))
-        kobo_field_mapping = KoboFieldMapping(**data)
-        kobo_field_mapping.save(user=info.context.user)
-        return None
+    def _mutate(cls, user, **data):
+        response = KoboFormService(user).update(_clean_mutation_metadata(data))
+        return None if response.get("success") else response
 
 
+class DeleteKoboFormMutation(BaseHistoryModelDeleteMutationMixin, BaseMutation):
+    _mutation_class = "DeleteKoboFormMutation"
+    _mutation_module = "kobo_connect"
+    _model = KoboForm
 
-class UpdateKoboFieldMappingMutation(OpenIMISMutation):
+    class Input(DeleteInput):
+        pass
+
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.change_kobofieldmapping'):
-            raise PermissionDenied(_("Unauthorized"))
-        kobo_field_mapping = KoboFieldMapping.objects.get(id=data['id'])
-        for key, value in data.items():
-            setattr(kobo_field_mapping, key, value)
-        kobo_field_mapping.save(user=info.context.user)
-        return None
+    def _validate_mutation(cls, user, **data):
+        super()._validate_mutation(user, **data)
+        _require_permissions(user, KoboConnectConfig.gql_mutation_forms_delete_perms)
 
-
-
-class DeleteKoboFieldMappingMutation(OpenIMISMutation):
     @classmethod
-    def mutate(cls, root, info, **data):
-        if not info.context.user.has_perms('kobo_connect.delete_kobofieldmapping'):
-            raise PermissionDenied(_("Unauthorized"))
-        KoboFieldMapping.objects.filter(id__in=data['ids']).delete()
-        return None
+    def _mutate(cls, user, **data):
+        return _delete_with_service(KoboFormService, user, data)
+
+
+class KoboFieldMappingInput(OpenIMISMutation.Input):
+    kobo_form_id = graphene.UUID(required=True)
+    kobo_field = graphene.String(required=True)
+    grievance_field = graphene.String(required=True)
+
+
+class UpdateKoboFieldMappingInput(KoboFieldMappingInput):
+    id = graphene.UUID(required=True)
+    kobo_form_id = graphene.UUID()
+
+
+class CreateKoboFieldMappingMutation(BaseHistoryModelCreateMutationMixin, BaseMutation):
+    _mutation_class = "CreateKoboFieldMappingMutation"
+    _mutation_module = "kobo_connect"
+    _model = KoboFieldMapping
+
+    class Input(KoboFieldMappingInput):
+        pass
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        super()._validate_mutation(user, **data)
+        _require_permissions(user, KoboConnectConfig.gql_mutation_forms_add_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        response = KoboFieldMappingService(user).create(_clean_mutation_metadata(data))
+        return None if response.get("success") else response
+
+
+class UpdateKoboFieldMappingMutation(BaseHistoryModelUpdateMutationMixin, BaseMutation):
+    _mutation_class = "UpdateKoboFieldMappingMutation"
+    _mutation_module = "kobo_connect"
+    _model = KoboFieldMapping
+
+    class Input(UpdateKoboFieldMappingInput):
+        pass
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        super()._validate_mutation(user, **data)
+        _require_permissions(user, KoboConnectConfig.gql_mutation_forms_update_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        response = KoboFieldMappingService(user).update(_clean_mutation_metadata(data))
+        return None if response.get("success") else response
+
+
+class DeleteKoboFieldMappingMutation(BaseHistoryModelDeleteMutationMixin, BaseMutation):
+    _mutation_class = "DeleteKoboFieldMappingMutation"
+    _mutation_module = "kobo_connect"
+    _model = KoboFieldMapping
+
+    class Input(DeleteInput):
+        pass
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        super()._validate_mutation(user, **data)
+        _require_permissions(user, KoboConnectConfig.gql_mutation_forms_delete_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        return _delete_with_service(KoboFieldMappingService, user, data)

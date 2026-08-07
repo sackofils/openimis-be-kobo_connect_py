@@ -1,16 +1,13 @@
-from django.conf import settings
 from django.db import models
 from core import models as core_models
-from core.models import HistoryBusinessModel, User, HistoryModel
-from django.contrib.contenttypes.fields import GenericForeignKey
-from django.contrib.contenttypes.models import ContentType
-from graphql import ResolveInfo
+from core.models import HistoryBusinessModel, User
+from django_cryptography.fields import encrypt
 
 
 class KoboToken(HistoryBusinessModel):
     url_kobo = models.CharField(max_length=255)
     api_version = models.CharField(max_length=8, null=True, blank=True)
-    api_key = models.CharField(max_length=255)
+    api_key = encrypt(models.CharField(max_length=255))
     user = models.ForeignKey(User, on_delete=models.CASCADE)
 
     def __str__(self):

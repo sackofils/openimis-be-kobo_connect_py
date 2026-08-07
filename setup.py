@@ -22,10 +22,13 @@ setup(
     install_requires=[
         'django',
         'django-db-signals',
+        'django-cryptography',
         'djangorestframework',
         'openimis-be-core',
         'openimis-be-grievance_social_protection',
-        'pykobo',
+        'openimis-be-location',
+        'openimis-be-monitoring_evaluation',
+        'requests',
     ],
     classifiers=[
         'Environment :: Web Environment',
